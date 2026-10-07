@@ -51,7 +51,7 @@ traffic and DNS move back. The VPS itself needs no knowledge of any of this.
 - [Changing settings later](#changing-settings-later)
 - [Installer options](#installer-options)
 - [Configuration reference](#configuration-reference)
-- [OPNsense configuration](#opnsense-configuration-high-level)
+- [OPNsense configuration](#opnsense-configuration)
 - [Firewall model](#firewall-model)
 - [Status and troubleshooting](#status-and-troubleshooting)
 - [Removing wg-relay](#removing-wg-relay)
@@ -62,8 +62,10 @@ traffic and DNS move back. The VPS itself needs no knowledge of any of this.
 
 ## Quick start
 
-Open UDP 51820 in your provider's firewall or security group first, if it has
-one; the installer can't change provider-level firewalls.
+Open the relay's UDP port (`WG_PORT`, 51820 by default) in your provider's
+firewall or security group first, if it has one; the installer can't change
+provider-level firewalls. If you forward a home WireGuard server through the
+relay, see [Common choices](#common-choices) before picking the port.
 
 ```bash
 tar xzf wg-relay.tar.gz      # or: git clone <your-repo-url> wg-relay
@@ -114,7 +116,7 @@ The default is **3** when wg-relay is already installed on this VPS, otherwise *
 A new tunnel looks like this:
 
 ```
-wg-relay 0.9.0
+wg-relay 0.9.1
 [1/5] Installing packages... done
 
 Installation type:
@@ -254,7 +256,7 @@ setting plus the keys:
 
 ```
 -----BEGIN WG-RELAY MIGRATION-----
-# wg-relay 0.9.0, exported from relay-old, 2026-10-07 20:26 UTC
+# wg-relay 0.9.1, exported from relay-old, 2026-10-07 20:26 UTC
 WG_INTERFACE=wg0
 WG_PORT=51820
 ...
@@ -334,14 +336,14 @@ edit, re-run `sudo ./install.sh`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `WG_INTERFACE` | `wg0` | Tunnel interface name (`wg-quick@<name>`) |
-| `WG_PORT` | `51820` | UDP listen port |
+| `WG_PORT` | `51820` | Relay's UDP listen port. Use another (e.g. `51821`) if you forward a home WireGuard server on 51820 |
 | `WG_SERVER_ADDRESS` | `10.250.0.1/24` | VPS tunnel address and subnet. Must not clash with home or WAN subnets |
 | `WG_PEER_ADDRESS` | `10.250.0.2/32` | OPNsense tunnel address. Inbound forwards are sent here |
 | `WG_MTU` | `1380` | Tunnel MTU. Conservative for LTE; set the same on OPNsense |
 | `WG_PRIVATE_KEY_FILE` | `/etc/wireguard/private.key` | Where this VPS's private key is stored. Set by the installer's key questions |
 | `WG_PRESHARED_KEY_FILE` | *(empty)* | Pre-shared key: empty = not decided, `none` = none, or a key file path. Set by the installer |
 | `WG_PEER_PUBLIC_KEY` | *(empty)* | OPNsense instance public key. Set by the installer, or edit it here |
-| `WG_PEER_ALLOWED_IPS` | `10.250.0.2/32` | Sources accepted from the peer. Add LAN subnets if OPNsense does not NAT onto the tunnel. `/0` is rejected |
+| `WG_PEER_ALLOWED_IPS` | `10.250.0.2/32` | Sources accepted from the peer: the tunnel /32 if OPNsense NATs onto the tunnel, plus every LAN subnet if it doesn't. `/0` is rejected |
 | `WAN_INTERFACE` | `auto` | Detected from the route to the Internet; set a name only if detection is wrong |
 | `SSH_PORTS` | `auto` | SSH ports to allow; or an explicit list like `22 2222` |
 | `ENABLE_IPV4_FORWARDING` | `yes` | Required for egress and port forwards |
@@ -362,18 +364,46 @@ tunnel), allowed IPs or the tunnel subnet overlapping the WAN network,
 forwarding the VPS's SSH port, forwarding `WG_PORT`, and the current SSH
 session's port missing from `SSH_PORTS`.
 
+
+### Common choices
+
+**Forwarding a home WireGuard server.** If you expose a WireGuard server at
+home through the relay (for example `FORWARD_UDP_PORTS=51820`), the relay
+can't also listen on 51820: the installer refuses to forward its own port. Give
+the relay a different one:
+
+```
+WG_PORT=51821
+FORWARD_UDP_PORTS=51820
+```
+
+Use the new port in the OPNsense peer endpoint and the provider firewall.
+
+**NAT or no NAT on OPNsense.** Both work; `WG_PEER_ALLOWED_IPS` must match
+whichever you choose on OPNsense's WireGuard interface:
+
+| OPNsense outbound NAT on `WG_RELAY` | `WG_PEER_ALLOWED_IPS` | What the VPS sees |
+|---|---|---|
+| NAT to the interface address | `10.250.0.2/32` | Everything from `10.250.0.2` |
+| No NAT | `10.250.0.2/32, 192.168.0.0/23, 10.0.0.0/24` (your LAN subnets) | Real LAN addresses (it masquerades them on the way out) |
+
+If they don't match, the tunnel handshakes but traffic from home is dropped at
+the VPS.
+
 ---
 
-## OPNsense configuration (high level)
+## OPNsense configuration
 
-OPNsense menu names vary slightly between versions; the concepts below don't.
+**Step-by-step guide: [docs/opnsense.md](docs/opnsense.md).** The list below is
+the overview. OPNsense menu names vary slightly between versions; the concepts
+don't.
 
 1. **WireGuard instance** (VPN → WireGuard → Instances): generate a keypair,
    tunnel address `10.250.0.2/24`, MTU `1380`, enable **Disable routes**, and
    set the gateway to `10.250.0.1`. Copy its public key into
    `WG_PEER_PUBLIC_KEY` on the VPS.
 2. **Peer**: public key = the VPS's key (printed by the installer), endpoint =
-   your relay DNS name (e.g. `relay.example.com`) or the VPS IP, port `51820`,
+   your relay DNS name (e.g. `relay.example.com`) or the VPS IP, port `WG_PORT`,
    allowed IPs `0.0.0.0/0`, keepalive `25` (use `15` if your carrier's NAT
    drops idle UDP quickly). Add the preshared key if you use one.
 3. **Assign the interface** (e.g. `WG_RELAY`) and enable it. Assigning it
@@ -391,10 +421,12 @@ OPNsense menu names vary slightly between versions; the concepts below don't.
    default route, not LAN rules. Enable default gateway switching and give the
    WireGuard gateway a better priority than the LTE gateway, so that during an
    outage OPNsense defaults to the tunnel, never to raw CGNAT LTE.
-8. **Outbound NAT**: NAT LAN traffic leaving `WG_RELAY` to the interface
-   address (`10.250.0.2`). This matches the default `WG_PEER_ALLOWED_IPS`.
-   If you'd rather not NAT, add your LAN subnets to `WG_PEER_ALLOWED_IPS`
-   instead.
+8. **Outbound NAT**: choose one, and set `WG_PEER_ALLOWED_IPS` to match
+   (see [Common choices](#common-choices)):
+   - NAT LAN traffic leaving `WG_RELAY` to its interface address
+     (`10.250.0.2`); keep `WG_PEER_ALLOWED_IPS` at the tunnel /32.
+   - No NAT on `WG_RELAY`; add every LAN subnet to `WG_PEER_ALLOWED_IPS`, and
+     the VPS masquerades them.
 9. **Port forwards**: for every service you expose, add a port forward on
    `WG_RELAY` mirroring the one on your primary WAN, and list the same ports
    in `FORWARD_TCP_PORTS` / `FORWARD_UDP_PORTS`. Because `WG_RELAY` has a
@@ -481,7 +513,7 @@ state with drop counters, configured forwards, and routes.
 Useful packet capture (install `tcpdump` first):
 
 ```bash
-sudo tcpdump -ni any udp port 51820                     # tunnel packets arriving?
+sudo tcpdump -ni any udp port 51820                     # tunnel packets arriving? (use your WG_PORT)
 sudo tcpdump -ni wg0                                     # traffic inside the tunnel
 ```
 
@@ -534,7 +566,7 @@ Run `./install.sh --export` first if you might want the keys back.
 - **Updates**: consider `unattended-upgrades` for security patches. This kit
   doesn't configure it.
 - **Provider firewall**: if your provider offers one, it can add a second layer
-  (allow only SSH, UDP 51820, and your forwarded ports).
+  (allow only SSH, UDP `WG_PORT`, and your forwarded ports).
 
 ---
 
@@ -548,6 +580,9 @@ wg-relay/
 ├── uninstall.sh               removes everything install.sh added (no prompts)
 ├── config.env                 settings (ships with working defaults; no secrets)
 ├── README.md
+├── CHANGELOG.md
+├── docs/
+│   └── opnsense.md            step-by-step OPNsense setup
 ├── .gitignore                 keeps key files out of git
 ├── lib/common.sh              shared parser, validation, detection, migration block
 ├── templates/
