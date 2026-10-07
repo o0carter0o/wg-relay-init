@@ -1,0 +1,3 @@
+# Never commit key material. (config.env holds no secrets: keys live in key files.)
+*.key
+*.psk
